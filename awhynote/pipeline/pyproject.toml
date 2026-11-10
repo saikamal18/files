@@ -1,0 +1,19 @@
+[project]
+name = "awhynote"
+version = "0.1.0"
+description = "Approval-gated Reels pipeline for the awhynote Instagram page"
+requires-python = ">=3.10"
+dependencies = ["requests", "Pillow", "edge-tts", "imageio-ffmpeg"]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+awhynote = "awhynote.cli:main"
+
+[tool.setuptools]
+packages = ["awhynote"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["network: needs internet access (skipped automatically if unreachable)"]
