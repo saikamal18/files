@@ -7,14 +7,24 @@ from functools import lru_cache
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
 
+from .styles import Style, get_style
 from .util import ensure_fonts
 
 W, H = 1080, 1920
 INK, PAPER, YELLOW, RED, BROWN = (14, 14, 15), (237, 230, 214), (255, 214, 10), (229, 57, 43), (107, 74, 43)
 CANVAS_SCALE = 1.2  # Ken Burns source canvas = 1.2x output, so a 1.0-1.17x window never upsamples
 
-_FONT_FILES = {"head": "ArchivoBlack-Regular.ttf", "serif": "InstrumentSerif-Italic.ttf", "mono": "SpaceMono-Bold.ttf"}
+_FONT_FILES = {"serif": "InstrumentSerif-Italic.ttf", "mono": "SpaceMono-Bold.ttf"}
 _paths: dict[str, str] | None = None
+_head: tuple[str, int | None] = (get_style(None).file, get_style(None).wght)
+
+
+def use_style(style: Style) -> None:
+    """Make `font("head", …)` return the style's headline font (captions, text cards, cover, year stamp)."""
+    global _head
+    if _head != (style.file, style.wght):
+        _head = (style.file, style.wght)
+        font.cache_clear()
 
 
 @lru_cache(maxsize=64)
@@ -22,6 +32,14 @@ def font(kind: str, size: int) -> ImageFont.FreeTypeFont:
     global _paths
     if _paths is None:
         _paths = ensure_fonts(download=True)
+    if kind == "head":
+        fnt = ImageFont.truetype(_paths[_head[0]], size)
+        if _head[1]:
+            try:
+                fnt.set_variation_by_axes([_head[1]])
+            except (OSError, AttributeError):
+                pass  # a static fallback font has no weight axis
+        return fnt
     return ImageFont.truetype(_paths[_FONT_FILES[kind]], size)
 
 

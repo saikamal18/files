@@ -276,3 +276,51 @@ def test_render_gate_edit_media_vs_script(at_media):
     say(p, "the second fact is wrong")
     ep = p.get("M01")
     assert ep.stage == "script" and ep.feedback("script") == ["the second fact is wrong"]
+
+
+def test_new_command_accepts_the_topic_id(cfg):
+    cfg.max_active = 1
+    p, n = new_pipeline(cfg)
+    say(p, "/new M01")
+    assert (p.get("M01").stage, p.get("M01").status) == ("research", "awaiting_approval")
+    say(p, "/new m01")
+    assert "already exists" in texts(n)
+    say(p, "/new")
+    assert "Usage: /new M01" in texts(n)
+    say(p, "/new Z99")
+    assert "not in the backlog" in texts(n)
+
+
+def test_episode_id_can_come_first_or_last_in_commands(at_media):
+    p, n = at_media
+    say(p, "/skip M01 2")
+    say(p, "/skip 3 M01")
+    say(p, "/skip s9")
+    assert "Shot 2 will use a text card" in texts(n) and "Shot 3 will use a text card" in texts(n) and "Shot 9 will use a text card" in texts(n)
+    say(p, "/drop M01")
+    assert p.get("M01").status == "dropped"
+
+
+def test_rerender_goes_back_from_the_package_gate(at_media):
+    p, n = at_media
+    for i, s in enumerate(media_shots(p)[:3], 1):
+        p.handle_event({"type": "file", "kind": "photo", "file_id": f"f{i}", "name": "photo.jpg", "caption": str(s), "size": 1000})
+    for s in media_shots(p)[3:]:
+        say(p, f"/skip {s}")
+    press(p, n, "done")
+    press(p, n, "approve")  # -> render
+    press(p, n, "approve")  # -> package
+    assert (p.get("M01").stage, p.get("M01").status) == ("package", "awaiting_approval")
+    v = p.get("M01").version("render")
+    n.sent.clear()
+    say(p, "/rerender")
+    ep = p.get("M01")
+    assert (ep.stage, ep.status) == ("render", "awaiting_approval") and ep.version("render") == v + 1
+    assert any(m["kind"] == "video" and m["path"].endswith("preview.mp4") for m in n.sent)
+    say(p, "/rerender M01")  # still fine at the render gate, with the id
+    assert p.get("M01").version("render") == v + 2
+    with p.edit("M01") as e:
+        e.set("script", "awaiting_approval")
+    n.sent.clear()
+    say(p, "/rerender")
+    assert "Nothing is waiting" in texts(n) and p.get("M01").stage == "script"

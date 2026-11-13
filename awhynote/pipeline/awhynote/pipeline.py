@@ -13,12 +13,13 @@ from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
 
-from . import media, plan, prompts, render, research, script as script_mod, tts
-from .config import Config
+from . import media, plan, prompts, render, research, script as script_mod, tts, webimages
+from .config import ROOT, Config
 from .llm import LLM
 from .notify import TG_DOWNLOAD_LIMIT, Notifier
 from .store import STAGE_LABEL, STAGES, Episode, list_episodes
-from .util import write_json
+from .styles import STYLES
+from .util import set_env, write_json
 
 log = logging.getLogger("awhynote")
 EP_RE = r"[A-Za-z]\d{2}"
@@ -35,6 +36,9 @@ Commands
 /edit [ID] text  give feedback on the current gate
 /approve [ID]  /redo [ID]  /drop ID
 Media stage: send photos/videos with the shot number as the caption (3), or `M01 3` if several episodes are open.
+/rerender [ID]  at the render or package gate: render again with the current look and music
+/styles  see the caption looks · /style NAME  pick one (poppins, montserrat, anton, bebas)
+/web [shot]  no photo for a shot? fetch an open-licence picture from the web (/web 3 swaps shot 3 for another one)
 /done  I've sent everything · /skip 2  use a text card for shot 2
 /callout 4 0.55 0.30 0.10  red circle on shot 4 (x y radius, 0-1) · /clear 4  remove shot 4's files"""
 
@@ -57,8 +61,9 @@ def _fmt_date(d: str) -> str:
 
 
 class Pipeline:
-    def __init__(self, cfg: Config, notifier: Notifier, sync: bool = False, check_urls: bool = True):
+    def __init__(self, cfg: Config, notifier: Notifier, sync: bool = False, check_urls: bool = True, env_path: Path | None = None):
         self.cfg, self.n, self.sync, self.check_urls = cfg, notifier, sync, check_urls
+        self.env_path = env_path or (ROOT / ".env")
         self.lock = threading.RLock()
         self.q: queue.Queue[str] = queue.Queue()
         self._stop = threading.Event()
@@ -190,6 +195,10 @@ class Pipeline:
             tts.synthesize(cfg, ep, ep.read("script.json"))
         elif stage == "media":
             if phase != "prepare":
+                if cfg.web_images == "auto":
+                    miss = media.scan(ep, ep.read("script.json"))["missing"]
+                    if miss:
+                        self._web_run(ep.id, miss, report=False)
                 return "collect"
             media.prepare(cfg, ep, ep.read("script.json"), ep.read("voice.json"))
         elif stage == "render":
@@ -212,6 +221,9 @@ class Pipeline:
         caption = (data.get("caption", "").strip() + "\n\n" + tags).strip()
         sources = data.get("pinned_comment_sources") or []
         src_text = "Sources:\n" + "\n".join(f"• {s.get('claim', '')} — {s.get('source', '')} {s.get('url', '')}".strip() for s in sources) if sources else "Sources: (add before posting)"
+        credits = webimages.credit_lines(ep)
+        if credits:
+            src_text += "\n\n" + credits
         ep.path("package").mkdir(exist_ok=True)
         ep.path("package/caption.txt").write_text(caption, encoding="utf-8")
         ep.path("package/sources.txt").write_text(src_text, encoding="utf-8")
@@ -225,7 +237,10 @@ class Pipeline:
             return f"A:{ep.id}:{s}:{v}:{act}"
 
         if ep.status == "collecting":
-            return [[("✅ I've sent everything", cb("done"))], [("⏭ Skip topic", cb("skip"))]]
+            rows = [[("✅ I've sent everything", cb("done"))]]
+            if s == "media" and self.cfg.web_images != "off":
+                rows.append([("🌐 Fill missing shots from the web", cb("web"))])
+            return rows + [[("⏭ Skip topic", cb("skip"))]]
         if ep.status == "failed":
             return [[("🔄 Retry", cb("redo")), ("⏭ Skip topic", cb("skip"))]]
         approve = "✅ Approve & send final to my phone" if s == "package" else "✅ Approve"
@@ -251,6 +266,8 @@ class Pipeline:
             sc, voice = ep.read("script.json"), ep.read("voice.json")
             if ep.status == "collecting":
                 body = media.checklist_text(ep, sc, voice, media.scan(ep, sc))
+                if self.cfg.web_images != "off":
+                    body += "\n🌐 No photo for a shot? Tap the web button or send /web (or /web 3 for one shot). I only use openly licensed pictures and credit each one in the sources comment."
             else:
                 if not reminder:
                     self._file(ep.path("media/contact.jpg"), f"Contact sheet · {ep.id}", "photo")
@@ -312,6 +329,9 @@ class Pipeline:
                 e.set(status="dropped")
                 e.log("dropped by creator")
             self._say(f"⏭ {ep_id} skipped. It will not be scheduled again.")
+            return True
+        if act == "web" and stage == "media" and st == "collecting":
+            self._web(ep_id, None)
             return True
         if act == "approve" and st == "awaiting_approval":
             with self.edit(ep_id) as e:
@@ -439,21 +459,116 @@ class Pipeline:
             return None
         return ep
 
+    def _web(self, ep_id: str, shot: int | None) -> None:
+        if self.cfg.web_images == "off":
+            return self._say("Web pictures are switched off. Set AWN_WEB_IMAGES=ask in .env and restart.")
+        ep = self.get(ep_id)
+        sc = ep.read("script.json")
+        by_id = {x["id"]: x for x in sc["shots"]}
+        scanned = media.scan(ep, sc)
+        if shot is None:
+            targets = list(scanned["missing"])
+            if not targets:
+                return self._say("Every shot already has media or a text card. /web 3 swaps a fetched picture for shot 3.")
+        else:
+            if shot not in by_id:
+                return self._say(f"{ep.id} has no shot {shot}.")
+            if by_id[shot]["style"] == "text":
+                return self._say(f"Shot {shot} is a text card by design.")
+            have = [Path(f).name for f in scanned["shots"][shot]["files"]]
+            mine = webimages.web_files(ep).get(shot)
+            if have and have != [mine]:
+                return self._say(f"Shot {shot} has your own file. /clear {shot} first if you'd rather have a web picture.")
+            if mine:
+                webimages.discard(ep, shot)
+            media.set_skip(ep, shot, False)
+            targets = [shot]
+        self._say(f"🌐 Looking for open-licence pictures for shot{'s' if len(targets) > 1 else ''} {', '.join(map(str, targets))}… (about {10 * len(targets)} s)")
+        if self.sync:
+            self._web_run(ep_id, targets)
+        else:
+            threading.Thread(target=self._web_run, args=(ep_id, targets), daemon=True).start()
+
+    def _web_run(self, ep_id: str, targets: list[int], report: bool = True) -> None:
+        ep = self.get(ep_id)
+        try:
+            results = webimages.fill(self.cfg, ep, ep.read("script.json"), targets)
+        except Exception as e:
+            log.exception("web pictures failed")
+            return self._say(f"⚠️ Couldn't search the web just now: {e}\nSend your own photo, or try /web again.")
+        for r in results:
+            if r.ok:
+                self._file(webimages.preview(ep, r.path), f"🌐 Shot {r.shot} · {r.message}\n/web {r.shot} for another · /clear {r.shot} to remove", "photo")
+            else:
+                self._say(f"🌐 Shot {r.shot}: {r.message}")
+        if not report:
+            return
+        with self.edit(ep_id) as e:
+            if e.status == "awaiting_approval" and e.stage == "media":
+                e.set(status="collecting")
+        ep = self.get(ep_id)
+        miss = media.scan(ep, ep.read("script.json"))["missing"]
+        tail = f"Still need: {', '.join(map(str, miss))}" if miss else "Everything has media. Check the pictures above, then press ✅."
+        self._say(f"🌐 {ep_id}: done. {tail}", self._buttons(ep))
+
+    def _send_styles(self) -> None:
+        try:
+            sheet = render.style_samples(self.cfg, self.cfg.data_dir / "styles")[0]
+            self._file(sheet, f"Caption styles. Now: {self.cfg.caption_style}. Pick with /style NAME", kind="photo")
+        except Exception as e:
+            log.exception("style samples failed")
+            self._say(f"Couldn't render the samples: {e}")
+
+    def _set_style(self, name: str) -> None:
+        if name not in STYLES:
+            return self._say(f"Usage: /style NAME, one of {', '.join(STYLES)}. /styles shows them.")
+        self.cfg.caption_style = name
+        try:
+            set_env(self.env_path, "AWN_CAPTION_STYLE", name)
+        except OSError as e:
+            log.warning("could not save AWN_CAPTION_STYLE: %s", e)
+        self._say(f"✅ Captions will use {name} from the next render (🔄 Redo at the render gate to re-render).")
+
     def _command(self, text: str) -> None:
         parts = text.split()
         cmd = parts[0].lower().split("@")[0]
         args = parts[1:]
-        ep_tok = args[-1] if args and re.fullmatch(EP_RE, args[-1]) else None
-        if ep_tok:
-            args = args[:-1]
+
+        def is_ep(tok: str) -> bool:
+            return bool(re.fullmatch(EP_RE, tok)) and tok[0].upper() != "S"  # "s10" is a shot, not an episode
+
+        ep_tok = None
+        if args and is_ep(args[-1]):
+            ep_tok, args = args[-1], args[:-1]
+        elif args and is_ep(args[0]):
+            ep_tok, args = args[0], args[1:]
         if cmd in ("/start", "/help"):
             return self._say(HELP)
         if cmd == "/status":
             return self._say(self.status_text())
+        if cmd == "/web":
+            ep = self._media_episode(ep_tok)
+            if not ep:
+                return
+            try:
+                shot = int(args[0].lstrip("sS")) if args else None
+            except ValueError:
+                return self._say("Usage: /web [shot number]")
+            return self._web(ep.id, shot)
+        if cmd == "/rerender":
+            ep = self._resolve(ep_tok, stages=("render", "package"), statuses=("awaiting_approval", "failed"))
+            if ep:
+                self._say(f"🔁 {ep.id}: rendering again with the current settings (captions {self.cfg.caption_style}, transitions {self.cfg.transition}, music {self.cfg.music_mode}). You'll get the render gate again.")
+                self._begin(ep.id, "render")
+            return
+        if cmd == "/styles":
+            return self._send_styles()
+        if cmd == "/style":
+            return self._set_style(args[0].lower() if args else "")
         if cmd == "/new":
-            if not args:
+            tid = (args[0] if args else ep_tok or "").upper()
+            if not tid:
                 return self._say("Usage: /new M01")
-            tid = args[0].upper()
             if Episode.exists(self.cfg.episodes_dir, tid):
                 return self._say(f"{tid} already exists. /status")
             if not self.start_episode(tid):

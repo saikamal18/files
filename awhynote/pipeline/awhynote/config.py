@@ -48,6 +48,15 @@ class Config:
     telegram_chat_id: str
     music_file: str
     music_db: float
+    caption_style: str = "poppins"
+    transition: str = "mix"
+    sfx_db: float = -20.0
+    music_mode: str = "auto"
+    music_dir: str = ""
+    web_images: str = "ask"
+    web_sources: str = "commons,openverse,pexels"
+    web_licenses: str = "attribution"
+    pexels_key: str = ""
     raw: dict | None = None
     fps: int = 30
     width: int = 1080
@@ -97,12 +106,21 @@ class Config:
             llm_base_url=g("LLM_BASE_URL", "https://api.openai.com/v1"),
             tts_provider=g("TTS_PROVIDER", "edge").lower(),
             edge_voice=g("EDGE_VOICE", "en-IN-PrabhatNeural"),
-            edge_rate=g("EDGE_RATE", "+0%"),
+            edge_rate=g("EDGE_RATE", "+12%"),
             eleven_key=g("ELEVENLABS_API_KEY"),
             eleven_voice=g("ELEVENLABS_VOICE_ID"),
             telegram_token=g("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=g("TELEGRAM_CHAT_ID"),
             music_file=g("AWN_MUSIC_FILE"),
-            music_db=float(g("AWN_MUSIC_DB", "-22")),
+            music_db=float(g("AWN_MUSIC_DB", "-19")),
+            caption_style=g("AWN_CAPTION_STYLE", "poppins").lower(),
+            transition=g("AWN_TRANSITION", "mix").lower(),
+            sfx_db=float(g("AWN_SFX_DB", "-20")),
+            music_mode=g("AWN_MUSIC", "auto").lower(),
+            music_dir=g("AWN_MUSIC_DIR"),
+            web_images=g("AWN_WEB_IMAGES", "ask").lower(),
+            web_sources=g("AWN_WEB_SOURCES", "commons,openverse,pexels").lower(),
+            web_licenses=g("AWN_WEB_LICENSES", "attribution").lower(),
+            pexels_key=g("PEXELS_API_KEY"),
             raw=dict(env),
         )

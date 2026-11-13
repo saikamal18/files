@@ -14,7 +14,7 @@ from . import plan
 from .config import ROOT, Config
 from .notify import ConsoleNotifier, TelegramAPI, TelegramError, TelegramNotifier
 from .pipeline import Pipeline
-from .util import ensure_fonts, media_info
+from .util import FONT_DIR, ensure_fonts, media_info, set_env
 
 ENV_EXAMPLE = """# awhynote pipeline settings. Copy to .env and fill in. Never commit this file.
 
@@ -35,7 +35,7 @@ LLM_MODEL=
 # --- Voice ---
 TTS_PROVIDER=edge
 EDGE_VOICE=en-IN-PrabhatNeural
-EDGE_RATE=+0%
+EDGE_RATE=+12%
 # ElevenLabs (optional, untested without a key): TTS_PROVIDER=elevenlabs
 # ELEVENLABS_API_KEY=
 # ELEVENLABS_VOICE_ID=
@@ -50,21 +50,30 @@ AWN_LEAD_DAYS=5
 AWN_REMINDER_HOURS=4
 AWN_MAX_REMINDERS=3
 AWN_MAX_ACTIVE=3
-# Optional royalty-free music bed (mixed about 22 dB under the voice)
-# AWN_MUSIC_FILE=/Users/you/Music/bed.mp3
+
+# --- Pictures from the web, for shots you have no photo for ---
+# ask = tap "Fill missing shots from the web" or send /web (default) | auto = fill them as soon as the media step opens | off
+AWN_WEB_IMAGES=ask
+# commons = Wikimedia Commons, openverse, pexels (needs a free key from pexels.com/api, put it in PEXELS_API_KEY)
+AWN_WEB_SOURCES=commons,openverse,pexels
+# PEXELS_API_KEY=
+# attribution = CC0, public domain, CC BY, CC BY-SA | strict = CC0, public domain, CC BY only
+AWN_WEB_LICENSES=attribution
+
+# --- Look and sound ---
+# Caption look: poppins (default) | montserrat | anton | bebas. See them side by side: awhynote styles
+AWN_CAPTION_STYLE=poppins
+# Cuts between shots: mix (a variety, chosen per shot) | fade | cut
+AWN_TRANSITION=mix
+# Background music, ducked under the voice:
+#   auto    = a track from assets/music/ if there is one, otherwise a soft generated pad
+#   ambient = always the generated pad       off = no music
+AWN_MUSIC=auto
+# AWN_MUSIC_FILE=/Users/you/Music/bed.mp3   (one fixed track; wins over the folder)
+# AWN_MUSIC_DIR=/Users/you/Music/awhynote   (default: assets/music)
+# AWN_MUSIC_DB=-19    (music level under the voice; lower = quieter)
+# AWN_SFX_DB=-20      (whoosh / hit level on transitions)
 """
-
-
-def set_env(path: Path, key: str, value: str) -> None:
-    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
-    for i, l in enumerate(lines):
-        if l.split("=", 1)[0].strip() == key:
-            lines[i] = f"{key}={value}"
-            break
-    else:
-        lines.append(f"{key}={value}")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    path.chmod(0o600)
 
 
 def setup_logging(cfg: Config) -> None:
@@ -91,7 +100,7 @@ def cmd_init(cfg: Config, a) -> int:
         env.write_text(ENV_EXAMPLE, encoding="utf-8")
         env.chmod(0o600)
         print(f"Created {env}. Edit it, then run `awhynote doctor`.")
-    (ROOT / ".gitignore").write_text(".env\ndata/\n.venv/\n__pycache__/\n*.pyc\n*.egg-info/\n.pytest_cache/\nassets/fonts/\n", encoding="utf-8")
+    (ROOT / ".gitignore").write_text(".env\ndata/\n.venv/\n__pycache__/\n*.pyc\n*.egg-info/\n.pytest_cache/\nassets/fonts/\nassets/music/\n", encoding="utf-8")
     ensure_fonts(download=True)
     cfg.episodes_dir.mkdir(parents=True, exist_ok=True)
     print("Fonts and data folder ready.")
@@ -113,7 +122,9 @@ def cmd_doctor(cfg: Config, a) -> int:
         line(False, f"ffmpeg not usable: {e}", "pip install imageio-ffmpeg, or install ffmpeg and set FFMPEG=…")
     fonts = ensure_fonts(download=a.online)
     for name, path in fonts.items():
-        line(Path(path).exists(), f"font {name}", "run `awhynote init` with internet, or drop the .ttf into assets/fonts/")
+        own = Path(path).parent == FONT_DIR
+        line(own, f"font {name}" + ("" if own else "  (using a system fallback; captions may lack ₹ or look different)"),
+             "run `awhynote init` with internet, or drop the .ttf into assets/fonts/")
     for label, p in (("backlog", cfg.backlog_csv), ("calendar", cfg.calendar_csv)):
         line(p.exists(), f"{label}: {p}")
     line(cfg.llm_provider == "mock" or bool(cfg.llm_api_key and cfg.llm_model),
@@ -124,6 +135,15 @@ def cmd_doctor(cfg: Config, a) -> int:
     line(bool(cfg.telegram_chat_id), "Telegram chat id set", "run `awhynote telegram-setup`")
     if cfg.music_file:
         line(Path(cfg.music_file).expanduser().exists(), f"music file: {cfg.music_file}")
+    elif cfg.music_mode == "off":
+        print("ℹ️  music: off")
+    else:
+        from . import music
+
+        n = len(music.library(cfg)) if cfg.music_mode != "ambient" else 0
+        print(f"ℹ️  music: {n} track(s) in {music.library_dir(cfg)}" if n else "ℹ️  music: soft generated pad (drop .mp3/.wav files into assets/music/ to use your own)")
+    print(f"ℹ️  web pictures: {cfg.web_images} · sources {cfg.web_sources}" + ("" if cfg.pexels_key or "pexels" not in cfg.web_sources else " (Pexels needs PEXELS_API_KEY, otherwise skipped)") + f" · licences {cfg.web_licenses}")
+    print(f"ℹ️  look: captions={cfg.caption_style} transitions={cfg.transition} voice rate={cfg.edge_rate}")
     if a.online:
         try:
             import edge_tts  # noqa: F401
@@ -136,6 +156,16 @@ def cmd_doctor(cfg: Config, a) -> int:
             line(asyncio.run(probe()), f"edge-tts reachable and voice {cfg.edge_voice} exists", "check internet / voice name")
         except Exception as e:
             line(False, f"edge-tts online check failed: {e}")
+        if cfg.web_images != "off":
+            try:
+                import requests
+
+                from .webimages import COMMONS_API, UA
+
+                r = requests.get(COMMONS_API, params={"action": "query", "meta": "siteinfo", "format": "json"}, headers={"User-Agent": UA}, timeout=15)
+                line(r.status_code == 200, "Wikimedia Commons reachable (web pictures)", "check internet")
+            except Exception as e:
+                line(False, f"Wikimedia Commons check failed: {e}", "check internet")
         if cfg.telegram_token:
             try:
                 me = TelegramAPI(cfg.telegram_token).call("getMe")
@@ -177,6 +207,18 @@ def cmd_new(cfg: Config, a) -> int:
         print("Not started (unknown id or already exists).")
         return 1
     print("Started. Keep `awhynote run` (or `console`) running to process it.")
+    return 0
+
+
+def cmd_styles(cfg: Config, a) -> int:
+    from .render import style_samples
+
+    out = cfg.data_dir / "styles"
+    paths = style_samples(cfg, out)
+    print("Caption styles rendered. Open the sheet to compare, then set AWN_CAPTION_STYLE in .env:\n")
+    for p in paths:
+        print(f"  {p}")
+    print(f"\nSheet: {out / 'styles_sheet.jpg'}")
     return 0
 
 
@@ -272,6 +314,7 @@ def main(argv: list[str] | None = None) -> int:
     nw = sub.add_parser("new", help="start one topic now")
     nw.add_argument("topic")
     nw.add_argument("--console", action="store_true")
+    sub.add_parser("styles", help="render sample frames of every caption style")
     sub.add_parser("run", help="run the pipeline + Telegram bot (keep it running)")
     c = sub.add_parser("console", help="run with terminal approvals instead of Telegram")
     c.add_argument("topic", nargs="?")
@@ -279,7 +322,7 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     cfg = Config.load()
     return {"init": cmd_init, "doctor": cmd_doctor, "plan": cmd_plan, "status": cmd_status, "new": cmd_new,
-            "run": cmd_run, "console": cmd_console, "telegram-setup": cmd_telegram_setup}[a.cmd](cfg, a)
+            "styles": cmd_styles, "run": cmd_run, "console": cmd_console, "telegram-setup": cmd_telegram_setup}[a.cmd](cfg, a)
 
 
 if __name__ == "__main__":

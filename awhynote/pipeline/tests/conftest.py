@@ -18,7 +18,7 @@ def cfg(tmp_path):
     shutil.copy(PROJECT / "03_performance_tracker.csv", tracker)
     c = Config.load(env_path=tmp_path / "none.env", overrides={
         "LLM_PROVIDER": "mock", "TTS_PROVIDER": "mock", "AWN_DATA_DIR": str(tmp_path / "data"), "AWN_TRACKER_CSV": str(tracker),
-        "LLM_API_KEY": "", "LLM_MODEL": "",
+        "LLM_API_KEY": "", "LLM_MODEL": "", "AWN_MUSIC": "off",
     })
     c.fps = 8  # keep end-to-end renders quick
     return c

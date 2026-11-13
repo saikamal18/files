@@ -138,3 +138,17 @@ Return JSON with this schema:
 Rules: caption line 1 is a search-friendly hook with the topic keywords; no emojis spam; pinned_comment_sources lists each used claim with its source and URL (leave URL empty if unknown).
 {_fmt_feedback(feedback)}"""
     return STYLE_BIBLE, user
+
+
+def web_queries_prompt(topic: dict, shots: list[dict]) -> tuple[str, str]:
+    items = [{"shot": s["id"], "should_show": s.get("brief") or s.get("stat_text", ""), "place": s.get("location_tag", ""), "year": s.get("year_stamp", "")} for s in shots]
+    user = f"""Topic of the video: {topic.get('hook_title', '')}
+
+For each shot below, give 2 or 3 short search queries (2 to 5 words each) that would find a REAL, documentary photograph of it on Wikimedia Commons or a stock-photo site.
+Rules: use the specific proper nouns, places and years; put the most specific query first and a broader fallback last; no adjectives like cinematic, beautiful or 4K; if a shot is about a banknote or currency note, return an empty list for it.
+
+Return JSON: {{"queries": {{"<shot id>": ["query one", "query two"]}}}}
+
+Shots:
+{json.dumps(items, ensure_ascii=False)}"""
+    return STYLE_BIBLE, user

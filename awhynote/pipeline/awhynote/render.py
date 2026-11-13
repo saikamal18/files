@@ -7,11 +7,14 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageEnhance
 
+from . import music, sfx
+from . import transitions as TR
 from . import visuals as V
 from .captions import CaptionTrack
 from .config import Config
 from .enhance import open_image
 from .store import Episode
+from .styles import get_style
 from .util import ensure_fonts, run_ffmpeg
 
 MAX_STILL_S = 3.4
@@ -21,8 +24,9 @@ SERIES_TINT = {"Money": (107, 74, 43), "History": (140, 105, 60), "Tech": (60, 9
 
 
 class _Seg:
-    def __init__(self, start: float, end: float, overlays: list, build):
+    def __init__(self, start: float, end: float, overlays: list, build, meta: dict | None = None):
         self.start, self.end, self.overlays = start, end, overlays
+        self.meta = meta or {}
         self._build = build
         self._obj = None
 
@@ -138,53 +142,117 @@ def build_segments(cfg: Config, ep: Episode, manifest: dict, total: float, scrip
                             canvases[key] = fn(img, shot.get("callout"))
                     canvas, focus = canvases[key]
                     return _Still(V.KenBurns(canvas, preset, d, focus))
-            segs.append(_Seg(s0, s1, overlays, build))
+            segs.append(_Seg(s0, s1, overlays, build, {"shot": shot["id"], "style": shot["style"], "vtype": shot.get("visual_type", "")}))
     return segs
 
 
-def _audio_filter(cfg: Config, total: float) -> tuple[list[str], str]:
-    music = Path(cfg.music_file).expanduser() if cfg.music_file else None
-    voice = f"[1:a]aresample=44100,apad=whole_dur={total:.3f}[v]"
-    if music and music.exists():
-        graph = (f"{voice};[2:a]aresample=44100,volume={cfg.music_db}dB,afade=t=in:d=0.6,afade=t=out:st={max(0, total - 1.4):.2f}:d=1.4[m];"
-                 f"[v][m]amix=inputs=2:duration=first:dropout_transition=0,volume=2,loudnorm=I=-14:TP=-1:LRA=11[a]")
-        return ["-stream_loop", "-1", "-i", str(music)], graph
-    return [], f"{voice};[v]loudnorm=I=-14:TP=-1:LRA=11[a]"
+def plan_transitions(cfg: Config, segs: list[_Seg]) -> list[tuple[str, float] | None]:
+    """Per cut (between segs[i] and segs[i+1]): (kind, half-length in s) or None for a hard cut."""
+    out: list[tuple[str, float] | None] = []
+    for i in range(len(segs) - 1):
+        a, b = segs[i], segs[i + 1]
+        same = a.meta.get("shot") == b.meta.get("shot")
+        kind = TR.choose(cfg.transition, b.meta, same, i, last=i == len(segs) - 2)
+        if not kind:
+            out.append(None)
+            continue
+        half = min(TR.length(kind, same) / 2, 0.4 * (a.end - a.start), 0.4 * (b.end - b.start))
+        out.append((kind, half) if half >= 0.05 else None)
+    return out
+
+
+def _audio_filter(cfg: Config, total: float, sfx_path: Path | None, music_path: Path | None) -> tuple[list[str], str]:
+    """Voice (+ soft sound effects) (+ music that ducks under the voice), then loudness-normalised."""
+    fmt = "aformat=sample_rates=44100:channel_layouts=stereo"
+    extra: list[str] = []
+    parts = [f"[1:a]aresample=44100,apad=whole_dur={total:.3f},{fmt}" + ("[vx];[vx]asplit=2[v][vsc]" if music_path else "[v]")]
+    labels, idx = ["[v]"], 2
+    if sfx_path:
+        extra += ["-i", str(sfx_path)]
+        parts.append(f"[{idx}:a]aresample=44100,{fmt},volume={cfg.sfx_db}dB,apad=whole_dur={total:.3f}[s]")
+        labels.append("[s]")
+        idx += 1
+    if music_path:
+        extra += ["-stream_loop", "-1", "-i", str(music_path)]
+        parts.append(f"[{idx}:a]aresample=44100,{fmt},volume={cfg.music_db}dB,afade=t=in:d=0.8,afade=t=out:st={max(0, total - 1.4):.2f}:d=1.4[m0]")
+        parts.append("[m0][vsc]sidechaincompress=threshold=0.03:ratio=9:attack=25:release=450:makeup=1[m]")
+        labels.append("[m]")
+    n = len(labels)
+    if n == 1:
+        parts.append("[v]loudnorm=I=-14:TP=-1:LRA=11[a]")
+    else:
+        parts.append(f"{''.join(labels)}amix=inputs={n}:duration=first:dropout_transition=0,volume={n},loudnorm=I=-14:TP=-1:LRA=11[a]")
+    return extra, ";".join(parts)
+
+
+TELEGRAM_TARGET_MB = 46
+
+
+def _fit_for_telegram(cfg: Config, ep: Episode, out: Path, total: float) -> None:
+    """Telegram bots can send at most 50 MB. If the render is bigger, keep it as final_master.mp4 and re-encode a lighter final.mp4."""
+    if out.stat().st_size <= TELEGRAM_TARGET_MB * 1e6:
+        return
+    master = ep.path("final_master.mp4")
+    out.replace(master)
+    kbps = max(1500, int(TELEGRAM_TARGET_MB * 8000 / total) - 170)
+    run_ffmpeg(cfg.ffmpeg, ["-i", str(master), "-c:v", "libx264", "-preset", "medium", "-b:v", f"{kbps}k", "-maxrate", f"{int(kbps * 1.25)}k",
+                            "-bufsize", f"{kbps * 2}k", "-profile:v", "high", "-c:a", "copy", "-movflags", "+faststart", str(out)])
 
 
 def render_video(cfg: Config, ep: Episode, progress=None, series_tag: str = "") -> dict:
     ensure_fonts(download=True)
+    V.use_style(get_style(cfg.caption_style))
     voice, script, manifest = ep.read("voice.json"), ep.read("script.json"), ep.read("media.json")
     total = voice["duration"] + TAIL_S
     fps = cfg.fps
     nframes = math.ceil(total * fps)
     segs = build_segments(cfg, ep, manifest, total, script)
-    track = CaptionTrack(voice)
+    track = CaptionTrack(voice, cfg.caption_style)
     tags = V.static_tags(series_tag or script.get("series_tag", ""), cfg.handle)
     source = V.source_pill(script["sources_line"]) if script.get("sources_line") else None
     vig, grains = V.vignette(), V.grain_frames()
     out = ep.path("final.mp4")
     part = ep.path("final.partial.mp4")
-    extra_in, afilter = _audio_filter(cfg, total)
+    bounds = plan_transitions(cfg, segs)
+    sfx_path = sfx.build_track([(segs[i].end, TR.SOUND_KINDS[b[0]]) for i, b in enumerate(bounds) if b and b[0] in TR.SOUND_KINDS], total, ep.path("sfx.wav"))
+    music_path = music.pick(cfg, ep.id)
+    extra_in, afilter = _audio_filter(cfg, total, sfx_path, music_path)
     cmd = [cfg.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{V.W}x{V.H}", "-r", str(fps), "-i", "-",
            "-i", str(ep.path("voice.wav")), *extra_in,
            "-filter_complex", f"[0:v]scale=out_color_matrix=bt709:out_range=tv,format=yuv420p[vout];{afilter}",
-           "-map", "[vout]", "-map", "[a]", "-c:v", "libx264", "-preset", "fast", "-crf", "21", "-maxrate", "6M", "-bufsize", "12M", "-profile:v", "high",
+           "-map", "[vout]", "-map", "[a]", "-c:v", "libx264", "-preset", "medium", "-crf", "19", "-maxrate", "6M", "-bufsize", "12M", "-profile:v", "high",
            "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-           "-c:a", "aac", "-b:a", "160k", "-t", f"{total:.3f}", "-movflags", "+faststart", "-f", "mp4", str(part)]
+           "-c:a", "aac", "-b:a", "192k", "-t", f"{total:.3f}", "-movflags", "+faststart", "-f", "mp4", str(part)]
     log = open(ep.path("ffmpeg_render.log"), "wb")
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=log)
-    ptr, last_pct = 0, -1
+    ptr, closed, last_pct = 0, 0, -1
+
+    def compose(t: float) -> tuple[Image.Image, list]:
+        cur = segs[ptr]
+        after = bounds[ptr] if ptr < len(bounds) else None
+        before = bounds[ptr - 1] if ptr > 0 else None
+        if after and t >= cur.end - after[1]:
+            kind, h = after
+            a, b, p = cur, segs[ptr + 1], (t - (cur.end - h)) / (2 * h)
+        elif before and t < cur.start + before[1]:
+            kind, h = before
+            a, b, p = segs[ptr - 1], cur, (t - (cur.start - h)) / (2 * h)
+        else:
+            return cur.frame(t), cur.overlays
+        return TR.blend(kind, a.frame(t), b.frame(t), p), (a.overlays if p < 0.5 else b.overlays)
+
     try:
         for i in range(nframes):
             t = i / fps
             while ptr < len(segs) - 1 and t >= segs[ptr].end:
-                segs[ptr].close()
                 ptr += 1
-            seg = segs[ptr]
-            frame = V.apply_grade(seg.frame(t), vig, grains[(i // 2) % len(grains)])
-            for img, pos in seg.overlays:
+            while closed < ptr and t >= segs[closed].end + (bounds[closed][1] if bounds[closed] else 0):
+                segs[closed].close()
+                closed += 1
+            raw, overlays = compose(t)
+            frame = V.apply_grade(raw, vig, grains[(i // 2) % len(grains)])
+            for img, pos in overlays:
                 frame.paste(img, pos, img)
             for img, pos in tags:
                 frame.paste(img, pos, img)
@@ -203,17 +271,55 @@ def render_video(cfg: Config, ep: Episode, progress=None, series_tag: str = "") 
     except BrokenPipeError:
         rc = proc.wait()
     finally:
-        for s in segs:
-            s.close()
+        for s_ in segs:
+            s_.close()
         log.close()
     if rc != 0:
         raise RuntimeError("ffmpeg render failed: " + ep.path("ffmpeg_render.log").read_text(errors="replace")[-800:])
     part.replace(out)
+    _fit_for_telegram(cfg, ep, out, total)
     run_ffmpeg(cfg.ffmpeg, ["-i", str(out), "-vf", "scale=540:960", "-c:v", "libx264", "-preset", "veryfast", "-crf", "29",
                             "-c:a", "aac", "-b:a", "80k", "-movflags", "+faststart", str(ep.path("preview.mp4"))])
     info = {"duration": round(total, 2), "frames": nframes, "size_mb": round(out.stat().st_size / 1e6, 1)}
     ep.write("render.json", info)
     return info
+
+
+def style_samples(cfg: Config, out_dir: Path) -> list[Path]:
+    """One sample frame per caption style plus a side-by-side sheet, so the look can be chosen by eye."""
+    from .captions import CaptionTrack
+    from .styles import STYLES
+
+    ensure_fonts(download=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    words = "The ₹10 note hides a temple".split()
+    voice = {"duration": 3.0, "beats": [{"id": 1, "shot": 1, "text": " ".join(words), "start": 0.0, "end": 3.0, "words": [
+        {"w": w, "start": i * 0.4, "end": i * 0.4 + 0.35, "hl": w == "temple"} for i, w in enumerate(words)]}]}
+    vig, grain = V.vignette(), V.grain_frames(1)[0]
+    paths, thumbs = [], []
+    for name, style in STYLES.items():
+        V.use_style(style)
+        canvas, focus = V.prepare_text("₹10 · 1938")
+        frame = V.apply_grade(V.KenBurns(canvas, "push", 1.0, focus).frame(0.0), vig, grain)
+        for img, pos in V.static_tags("NOTE 001", cfg.handle):
+            frame.paste(img, pos, img)
+        track = CaptionTrack(voice, style)
+        for ci, dy in zip(range(min(2, len(track.chunks))), (-110, 110)):
+            im, (x, y) = track._render(ci, len(track.chunks[ci].words))
+            frame.paste(im, (x, y + dy), im)
+        path = out_dir / f"style_{name}.jpg"
+        frame.save(path, quality=90)
+        paths.append(path)
+        thumbs.append((name, frame.resize((405, 720), Image.LANCZOS)))
+    V.use_style(get_style(cfg.caption_style))
+    sheet = Image.new("RGB", (len(thumbs) * 415 + 10, 770), (20, 20, 20))
+    d = ImageDraw.Draw(sheet)
+    for i, (name, th) in enumerate(thumbs):
+        sheet.paste(th, (10 + i * 415, 40))
+        d.text((10 + i * 415, 10), name, font=V.font("mono", 24), fill=V.YELLOW)
+    sheet_path = out_dir / "styles_sheet.jpg"
+    sheet.save(sheet_path, quality=88)
+    return [sheet_path, *paths]
 
 
 def shot_preview(cfg: Config, ep: Episode, shot: dict) -> Image.Image:
@@ -237,6 +343,7 @@ def shot_preview(cfg: Config, ep: Episode, shot: dict) -> Image.Image:
 # -- cover -------------------------------------------------------------------
 def make_cover(cfg: Config, ep: Episode, title: str, highlight: str, series_tag: str) -> Path:
     ensure_fonts(download=True)
+    V.use_style(get_style(cfg.caption_style))
     manifest = ep.read("media.json")
     base = shot_preview(cfg, ep, manifest["shots"][0])
     base = ImageEnhance.Brightness(base).enhance(0.45)

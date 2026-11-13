@@ -31,7 +31,7 @@
 Rule: at most 3 colours on screen at once (Ink + Paper + Yellow by default).
 
 ## 4. Typography (all free, Google Fonts, OFL)
-- **Headlines / captions:** Archivo (ExtraBold, expanded width) or Unbounded Bold.
+- **Headlines / captions:** Poppins ExtraBold (pipeline default; has the ₹ glyph). Alternatives built in: Montserrat ExtraBold, Anton (yellow-text highlight), Bebas Neue. Preview with `awhynote styles`. Archivo Black was dropped: it has no ₹.
 - **Accent words (serif italic):** Instrument Serif Italic or Cormorant Garamond Italic.
 - **Tags, locations, sources:** JetBrains Mono or Space Mono, all caps, wide tracking.
 

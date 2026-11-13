@@ -16,11 +16,19 @@ FONT_URLS = {
     "ArchivoBlack-Regular.ttf": "https://raw.githubusercontent.com/google/fonts/main/ofl/archivoblack/ArchivoBlack-Regular.ttf",
     "InstrumentSerif-Italic.ttf": "https://raw.githubusercontent.com/google/fonts/main/ofl/instrumentserif/InstrumentSerif-Italic.ttf",
     "SpaceMono-Bold.ttf": "https://raw.githubusercontent.com/google/fonts/main/ofl/spacemono/SpaceMono-Bold.ttf",
+    "Poppins-ExtraBold.ttf": "https://raw.githubusercontent.com/google/fonts/main/ofl/poppins/Poppins-ExtraBold.ttf",
+    "Montserrat-Var.ttf": "https://raw.githubusercontent.com/google/fonts/main/ofl/montserrat/Montserrat%5Bwght%5D.ttf",
+    "Anton-Regular.ttf": "https://raw.githubusercontent.com/google/fonts/main/ofl/anton/Anton-Regular.ttf",
+    "BebasNeue-Regular.ttf": "https://raw.githubusercontent.com/google/fonts/main/ofl/bebasneue/BebasNeue-Regular.ttf",
 }
 SYSTEM_FALLBACKS = {
     "ArchivoBlack-Regular.ttf": "/System/Library/Fonts/Supplemental/Arial Black.ttf",
     "InstrumentSerif-Italic.ttf": "/System/Library/Fonts/Supplemental/Georgia Italic.ttf",
     "SpaceMono-Bold.ttf": "/System/Library/Fonts/Menlo.ttc",
+    "Poppins-ExtraBold.ttf": "/System/Library/Fonts/Supplemental/Arial Black.ttf",
+    "Montserrat-Var.ttf": "/System/Library/Fonts/Supplemental/Arial Black.ttf",
+    "Anton-Regular.ttf": "/System/Library/Fonts/Supplemental/Impact.ttf",
+    "BebasNeue-Regular.ttf": "/System/Library/Fonts/Supplemental/Impact.ttf",
 }
 
 
@@ -101,3 +109,15 @@ def is_image(path: Path) -> bool:
 
 def is_video(path: Path) -> bool:
     return path.suffix.lower() in VIDEO_EXT
+
+
+def set_env(path: Path, key: str, value: str) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    for i, l in enumerate(lines):
+        if l.split("=", 1)[0].strip() == key:
+            lines[i] = f"{key}={value}"
+            break
+    else:
+        lines.append(f"{key}={value}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.chmod(0o600)

@@ -62,6 +62,9 @@ def mock_llm(task: str, payload: dict) -> dict:
     if task == "factcheck":
         lines = payload.get("lines", [])
         return {"verdicts": [{"line": l, "verdict": "TRUE", "note": "", "fix": ""} for l in lines[:3]]}
+    if task == "web_queries":
+        title = title.strip() or "India"
+        return {"queries": {str(sh["id"]): [f"{(sh.get('brief') or title)[:40]} photo"] for sh in payload.get("shots", [])}}
     if task == "package":
         return {
             "caption": f"{title}\nA surprising mock fact.\nSave this. Send it to someone who'd ask why.\nSources in pinned comment.",

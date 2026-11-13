@@ -13,7 +13,7 @@ You supply the real photos and videos. The pipeline only does the research, scri
 
 ```bash
 cd ~/awhynote/pipeline
-.venv/bin/awhynote init        # creates .env, downloads the 3 brand fonts, makes data/
+.venv/bin/awhynote init        # creates .env, downloads the brand fonts, makes data/
 .venv/bin/awhynote doctor      # tells you exactly what is still missing
 ```
 
@@ -41,7 +41,30 @@ Recommended extras: `LLM_CHECK_MODEL` (a different model for the hostile fact-ch
 
 ### Voice
 
-Default is free Microsoft Edge voices: `EDGE_VOICE=en-IN-PrabhatNeural` (try `en-IN-NeerjaNeural`). At Gate 3 you can reply `voice en-IN-NeerjaNeural` or `rate +8%`. ElevenLabs is supported (`TTS_PROVIDER=elevenlabs`, key and voice id) but has not been tried with a real key.
+Default is free Microsoft Edge voices: `EDGE_VOICE=en-IN-PrabhatNeural` (try `en-IN-NeerjaNeural`) at `EDGE_RATE=+12%` (a brisker read than the voice's default). If your `.env` was created earlier it still says `EDGE_RATE=+0%`: change it. At Gate 3 you can reply `voice en-IN-NeerjaNeural` or `rate +20%`. ElevenLabs is supported (`TTS_PROVIDER=elevenlabs`, key and voice id) but has not been tried with a real key.
+
+### Pictures from the web (for shots you have no photo for)
+
+At Gate 4 tap **🌐 Fill missing shots from the web** (or send `/web`; `/web 3` for one shot). For each shot without media the bot asks the LLM for 2-3 search queries, searches **Wikimedia Commons** and **Openverse** (no key) and **Pexels** (free key, `PEXELS_API_KEY`), and keeps only pictures you may reuse with credit: public domain, CC0, CC BY and CC BY-SA (`AWN_WEB_LICENSES=strict` drops BY-SA). Anything NC/ND or unlicensed is dropped, as are tiny images. You get each pick as a photo with its author and licence.
+
+- `/web 3` again swaps shot 3 for the next candidate; `/clear 3` removes it so you can send your own. A web picture never replaces a file you sent.
+- Every picture is credited under **Images:** in the sources comment you pin. CC BY-SA asks for credit and the same licence on adaptations; check the licence in each message, this is not legal advice.
+- **Banknote shots are never fetched:** shots about the note itself stay for your own photo. Fetched pictures are real photos, so check each one actually shows what the narration says.
+- `AWN_WEB_IMAGES=auto` fills missing shots as soon as Gate 4 opens; `off` hides the button.
+
+### Look and sound
+
+| Setting (`.env`) | Values | What it does |
+|---|---|---|
+| `AWN_CAPTION_STYLE` | `poppins` (default), `montserrat`, `anton`, `bebas` | Caption and text-card typeface and highlight style. Every one has the ₹ glyph. Words pop in as they are spoken. See them with `awhynote styles` or `/styles` in the bot, switch with `/style anton` |
+| `AWN_TRANSITION` | `mix` (default), `fade`, `cut` | `mix` picks per shot: flash into stat/text cards, dip or fade into archival photos, push into maps and stock, zoom-through into macro shots, a short fade inside a shot, a fade at the end. `push`, `zoom` and `flash` carry a soft whoosh or hit |
+| `AWN_MUSIC` | `auto` (default), `ambient`, `off` | `auto` uses a track from `assets/music/` (stable pick per episode) and otherwise a soft generated pad. `ambient` always uses the pad. The music ducks under the voice |
+| `AWN_MUSIC_FILE`, `AWN_MUSIC_DIR` | path | One fixed track, or a different music folder |
+| `AWN_MUSIC_DB`, `AWN_SFX_DB` | dB (default `-19`, `-20`) | Music and effects level relative to the voice. Lower is quieter |
+
+Use only music you have the rights to (royalty-free or Instagram-cleared). Drop `.mp3`/`.wav` files into `assets/music/`; names starting with `_` are ignored. Fonts are downloaded into `assets/fonts/` on the first run; `awhynote doctor` flags any font that is still a system fallback.
+
+Rendering is now x264 `medium`, CRF 19, capped at 6 Mbit/s (about 42 MB for a 55 s Reel). Telegram only accepts files up to 50 MB, so if the result is bigger the Telegram copy `final.mp4` is re-encoded to about 46 MB and the full-quality `final_master.mp4` stays on your Mac in the episode folder.
 
 ## 2. Running it
 
@@ -100,7 +123,7 @@ All commands: `/help` in the bot. Every button belongs to one gate version, so t
 ## 4. Files
 
 ```
-data/episodes/M01/   state.json, research.json, script.json, voice.m4a, media/, preview.mp4, final.mp4, cover.jpg, package/
+data/episodes/M01/   state.json, research.json, script.json, voice.m4a, media/, preview.mp4, final.mp4 (final_master.mp4 if it had to be shrunk), cover.jpg, package/
 data/pipeline.log
 ../03_performance_tracker.csv   gets a row when an episode is delivered
 ```
@@ -110,9 +133,9 @@ Posting stays manual on purpose: upload `final.mp4`, paste the caption, turn on 
 ## 5. Tests
 
 ```bash
-.venv/bin/python -m pytest tests -q     # 56 tests, about a minute, no network except one marked test
+.venv/bin/python -m pytest tests -q     # about 115 tests, about 4 minutes, no network except one marked test
 ```
 
 Covered: script validation, TTS timings, captions, media intake and enhancement, rendering (1080×1920, loudness), the full approval flow with a mock LLM, and the Telegram layer against a fake HTTP server.
 
-**Not verified against the real thing yet:** a live Telegram bot, a live LLM provider, ElevenLabs, the optional `realesrgan-ncnn-vulkan` upscaler hook, HEIC conversion (uses macOS `sips`), and the optional music bed (`AWN_MUSIC_FILE`). Try each once on a throwaway episode before relying on it. Many backlog facts are marked "(verify)"; treat every claim as unverified until Gate 1 shows a source you have checked.
+**Not verified against the real thing yet:** a live Telegram bot, a live LLM provider, ElevenLabs, the optional `realesrgan-ncnn-vulkan` upscaler hook, HEIC conversion (uses macOS `sips`), Openverse and Pexels replies (only the Wikimedia Commons reply was checked against the real API; Openverse timed out when I tried), and the generated music pad and sound effects (they are checked by measurement, not by ear: listen once on a throwaway episode and adjust `AWN_MUSIC_DB`). Try each once on a throwaway episode before relying on it. Many backlog facts are marked "(verify)"; treat every claim as unverified until Gate 1 shows a source you have checked.
