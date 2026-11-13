@@ -33,6 +33,7 @@ Buttons under each message: ✅ Approve · ✏️ Edit (then type what to change
 Commands
 /status  what is waiting on you
 /new ID  start a topic now (e.g. /new M01)
+/restart ID  start a topic over from the research step (the old run is kept in data/archive)
 /edit [ID] text  give feedback on the current gate
 /approve [ID]  /redo [ID]  /drop ID
 Media stage: send photos/videos with the shot number as the caption (3), or `M01 3` if several episodes are open.
@@ -519,6 +520,21 @@ class Pipeline:
             log.exception("style samples failed")
             self._say(f"Couldn't render the samples: {e}")
 
+    def _restart(self, ep_id: str) -> None:
+        if not Episode.exists(self.cfg.episodes_dir, ep_id):
+            return self._say(f"{ep_id} hasn't been started yet. Use /new {ep_id}.")
+        if not plan.topic_for(self.cfg, ep_id):
+            return self._say(f"{ep_id} is not in the backlog, so I can't start it again.")
+        with self.lock:
+            if self.get(ep_id).status == "working":
+                return self._say(f"{ep_id} is busy right now. Wait for its next message, or /drop {ep_id} first.")
+            archive = self.cfg.data_dir / "archive"
+            archive.mkdir(parents=True, exist_ok=True)
+            dest = archive / f"{ep_id}_{datetime.now():%Y%m%d-%H%M%S}"
+            (self.cfg.episodes_dir / ep_id).rename(dest)
+        self._say(f"📦 The old {ep_id} run is kept in {dest}")
+        self.start_episode(ep_id)
+
     def _set_style(self, name: str) -> None:
         if name not in STYLES:
             return self._say(f"Usage: /style NAME, one of {', '.join(STYLES)}. /styles shows them.")
@@ -570,10 +586,15 @@ class Pipeline:
             if not tid:
                 return self._say("Usage: /new M01")
             if Episode.exists(self.cfg.episodes_dir, tid):
-                return self._say(f"{tid} already exists. /status")
+                return self._say(f"{tid} already exists. /status\nTo run it again from the start: /restart {tid}")
             if not self.start_episode(tid):
                 self._say(f"{tid} is not in the backlog.")
             return
+        if cmd == "/restart":
+            tid = (args[0] if args else ep_tok or "").upper()
+            if not tid:
+                return self._say("Usage: /restart M01")
+            return self._restart(tid)
         if cmd in ("/approve", "/redo", "/drop"):
             ep = self._resolve(ep_tok)
             if ep:

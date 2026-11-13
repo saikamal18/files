@@ -324,3 +324,30 @@ def test_rerender_goes_back_from_the_package_gate(at_media):
     n.sent.clear()
     say(p, "/rerender")
     assert "Nothing is waiting" in texts(n) and p.get("M01").stage == "script"
+
+
+def test_restart_archives_a_skipped_episode_and_starts_over(at_media):
+    p, n = at_media
+    say(p, "/drop M01")
+    assert p.get("M01").status == "dropped"
+    n.sent.clear()
+    say(p, "/new M01")
+    assert "/restart M01" in texts(n)
+    say(p, "/restart M01")
+    ep = p.get("M01")
+    assert (ep.stage, ep.status) == ("research", "awaiting_approval")  # back at Gate 1
+    archived = list((p.cfg.data_dir / "archive").glob("M01_*"))
+    assert len(archived) == 1 and (archived[0] / "state.json").exists()
+    assert len(p.episodes()) == 1
+
+
+def test_restart_refuses_unknown_and_busy_episodes(at_media):
+    p, n = at_media
+    say(p, "/restart")
+    say(p, "/restart Z99")
+    assert "Usage: /restart M01" in texts(n) and "hasn't been started" in texts(n)
+    with p.edit("M01") as e:
+        e.set(status="working")
+    n.sent.clear()
+    say(p, "/restart M01")
+    assert "busy" in texts(n) and not (p.cfg.data_dir / "archive").exists()
